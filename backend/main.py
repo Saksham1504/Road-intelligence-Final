@@ -105,6 +105,53 @@ class Damage(Base):
     reports = relationship("ComplaintReport", cascade="all, delete-orphan", order_by="ComplaintReport.id")
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    email = Column(String(100), unique=True, nullable=False)
+    role = Column(String(20), default="inspector")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RoadImage(Base):
+    __tablename__ = "road_images"
+
+    id = Column(Integer, primary_key=True)
+    file_path = Column(String(255), nullable=False)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    captured_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class YoloDetection(Base):
+    __tablename__ = "detections"
+
+    id = Column(Integer, primary_key=True)
+    image_id = Column(Integer, ForeignKey("road_images.id", ondelete="CASCADE"), nullable=False)
+    damage_type = Column(String(50), nullable=False)
+    confidence = Column(Float, nullable=False)
+    bbox_x_center = Column(Float, nullable=False)
+    bbox_y_center = Column(Float, nullable=False)
+    bbox_width = Column(Float, nullable=False)
+    bbox_height = Column(Float, nullable=False)
+    severity = Column(String(20), default="Medium")
+    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class RepairTicket(Base):
+    __tablename__ = "repair_tickets"
+
+    id = Column(Integer, primary_key=True)
+    detection_id = Column(Integer, ForeignKey("detections.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(20), default="Pending")
+    assigned_worker = Column(String(100), nullable=True)
+    estimated_cost = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class ComplaintReport(Base):
     __tablename__ = "complaint_reports"
 
@@ -890,9 +937,17 @@ def health():
 
 
 @app.post("/api/government/login")
-def government_login(username: str = Form(...), password: str = Form(...)):
+def government_login(username: str = Form(...), password: str = Form(...), d: Session = Depends(db)):
     if not hmac.compare_digest(username, GOV_USERNAME) or not hmac.compare_digest(password, GOV_PASSWORD):
         raise HTTPException(status_code=401, detail="Invalid government credentials")
+    user_email = f"{username}@road-intelligence.local"
+    user = d.query(User).filter(User.email == user_email).first()
+    if user is None:
+        d.add(User(name=username, email=user_email, role="government"))
+    else:
+        user.name = username
+        user.role = "government"
+    d.commit()
     return {
         "access_token": make_token(username),
         "token_type": "bearer",
@@ -973,6 +1028,31 @@ async def detect(
     address = address_override.strip() if address_override and address_override.strip() else reverse_geocode(latitude, longitude)
 
     now = datetime.now(timezone.utc)
+    road_image = RoadImage(
+        file_path=str(original_path),
+        latitude=latitude,
+        longitude=longitude,
+        captured_at=now,
+    )
+    d.add(road_image)
+    d.flush()
+    for item in detections:
+        x1, y1, x2, y2 = item["bbox"]
+        detection = YoloDetection(
+            image_id=road_image.id,
+            damage_type=item["damage_type"],
+            confidence=float(item["confidence"]),
+            bbox_x_center=(x1 + x2) / 2,
+            bbox_y_center=(y1 + y2) / 2,
+            bbox_width=x2 - x1,
+            bbox_height=y2 - y1,
+            severity=item["severity"],
+            detected_at=now,
+        )
+        d.add(detection)
+        d.flush()
+        d.add(RepairTicket(detection_id=detection.id, status="Pending", updated_at=now))
+
     complaint_summary = build_complaint_row(
         detections=detections,
         latitude=latitude,
