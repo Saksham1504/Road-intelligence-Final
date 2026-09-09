@@ -56,10 +56,14 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 # -----------------------------
 # DATABASE
 # -----------------------------
-engine = create_engine(
-    "sqlite:///" + str(BASE / "road_intelligence.db"),
-    connect_args={"check_same_thread": False},
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://sih_admin:sih12345@localhost:5432/road_intelligence",
 )
+engine_options = {"pool_pre_ping": True}
+if DATABASE_URL.startswith("sqlite"):
+    engine_options["connect_args"] = {"check_same_thread": False}
+engine = create_engine(DATABASE_URL, **engine_options)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
@@ -212,73 +216,7 @@ def seed_demo_complaints():
         session.commit()
 
 
-# Small migration for an existing SQLite database created by the original prototype.
-with engine.begin() as conn:
-    if not inspect(engine).has_table("complaint_reports"):
-        conn.execute(text("CREATE TABLE complaint_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, complaint_id INTEGER NOT NULL, latitude FLOAT NOT NULL, longitude FLOAT NOT NULL, address VARCHAR, original_image_url VARCHAR, annotated_image_url VARCHAR, submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
-    detection_columns = {c["name"] for c in inspect(engine).get_columns("complaint_detections")}
-    if "report_id" not in detection_columns:
-        conn.execute(text("ALTER TABLE complaint_detections ADD COLUMN report_id INTEGER"))
-    report_columns = {c["name"] for c in inspect(engine).get_columns("complaint_reports")}
-    if "image_hash" not in report_columns:
-        conn.execute(text("ALTER TABLE complaint_reports ADD COLUMN image_hash VARCHAR"))
-    damage_columns = {c["name"] for c in inspect(engine).get_columns("damages")}
-    if "address" not in damage_columns:
-        conn.execute(text("ALTER TABLE damages ADD COLUMN address VARCHAR"))
-    if "latest_reported_at" not in damage_columns:
-        conn.execute(text("ALTER TABLE damages ADD COLUMN latest_reported_at DATETIME"))
-        conn.execute(text("UPDATE damages SET latest_reported_at = detected_at WHERE latest_reported_at IS NULL"))
-    if "report_count" not in damage_columns:
-        conn.execute(text("ALTER TABLE damages ADD COLUMN report_count INTEGER NOT NULL DEFAULT 1"))
-    for column_name, definition in {
-        "verification_status": "VARCHAR DEFAULT 'Pending Verification'",
-        "original_image_url": "VARCHAR",
-        "annotated_image_url": "VARCHAR",
-        "related_report_images": "VARCHAR",
-        "verified_at": "DATETIME",
-        "verified_by": "VARCHAR",
-        "rejected_at": "DATETIME",
-        "rejected_by": "VARCHAR",
-        "rejection_reason": "VARCHAR",
-        "completed_at": "DATETIME",
-        "completed_by": "VARCHAR",
-        "archived_at": "DATETIME",
-        "officer_action": "VARCHAR",
-    }.items():
-        if column_name not in damage_columns:
-            conn.execute(text(f"ALTER TABLE damages ADD COLUMN {column_name} {definition}"))
-
-    history_columns = {c["name"] for c in inspect(engine).get_columns("complaint_history")} if inspect(engine).has_table("complaint_history") else set()
-    if "complaint_history" not in inspect(engine).get_table_names():
-        conn.execute(text("CREATE TABLE complaint_history (id INTEGER PRIMARY KEY AUTOINCREMENT, complaint_id INTEGER NOT NULL, damage_type VARCHAR NOT NULL, confidence FLOAT NOT NULL, severity VARCHAR NOT NULL, latitude FLOAT NOT NULL, longitude FLOAT NOT NULL, address VARCHAR, original_image_url VARCHAR, annotated_image_url VARCHAR, related_report_images VARCHAR, status VARCHAR DEFAULT 'Completed', verification_status VARCHAR DEFAULT 'Accepted', final_status VARCHAR NOT NULL, rejection_reason VARCHAR, report_count INTEGER NOT NULL DEFAULT 1, detected_at DATETIME, verified_at DATETIME, completed_at DATETIME, rejected_at DATETIME, verified_by VARCHAR, completed_by VARCHAR, rejected_by VARCHAR, archived_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
-    else:
-        for column_name, definition in {
-            "complaint_id": "INTEGER NOT NULL DEFAULT 0",
-            "damage_type": "VARCHAR NOT NULL DEFAULT 'Unknown'",
-            "confidence": "FLOAT NOT NULL DEFAULT 0",
-            "severity": "VARCHAR NOT NULL DEFAULT 'Medium'",
-            "latitude": "FLOAT NOT NULL DEFAULT 0",
-            "longitude": "FLOAT NOT NULL DEFAULT 0",
-            "address": "VARCHAR",
-            "original_image_url": "VARCHAR",
-            "annotated_image_url": "VARCHAR",
-            "related_report_images": "VARCHAR",
-            "status": "VARCHAR DEFAULT 'Completed'",
-            "verification_status": "VARCHAR DEFAULT 'Accepted'",
-            "final_status": "VARCHAR NOT NULL DEFAULT 'Completed'",
-            "rejection_reason": "VARCHAR",
-            "report_count": "INTEGER NOT NULL DEFAULT 1",
-            "detected_at": "DATETIME",
-            "verified_at": "DATETIME",
-            "completed_at": "DATETIME",
-            "rejected_at": "DATETIME",
-            "verified_by": "VARCHAR",
-            "completed_by": "VARCHAR",
-            "rejected_by": "VARCHAR",
-            "archived_at": "DATETIME",
-        }.items():
-            if column_name not in history_columns:
-                conn.execute(text(f"ALTER TABLE complaint_history ADD COLUMN {column_name} {definition}"))
+# SQLAlchemy creates the complete complaint schema for PostgreSQL and fresh SQLite databases.
 
 # -----------------------------
 # AI MODEL

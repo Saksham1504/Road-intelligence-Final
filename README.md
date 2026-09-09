@@ -13,6 +13,11 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
+The backend uses the PostgreSQL database `road_intelligence` by default with:
+`postgresql+psycopg2://sih_admin:sih12345@localhost:5432/road_intelligence`.
+Set `DATABASE_URL` before starting the backend to use another PostgreSQL server or database.
+The frontend never connects directly to PostgreSQL; it reads and writes through the FastAPI API.
+
 Open `http://127.0.0.1:8000/docs` to verify the API.
 
 ## 2. Dashboard

@@ -1,4 +1,7 @@
 Set-Location "$PSScriptRoot\backend"
+if ([string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
+    $env:DATABASE_URL = "postgresql+psycopg2://sih_admin:sih12345@localhost:5432/road_intelligence"
+}
  $python = ".\.venv\Scripts\python.exe"
  $pythonReady = Test-Path $python
  if ($pythonReady) {
