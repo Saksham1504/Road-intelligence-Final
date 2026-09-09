@@ -5,19 +5,23 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import uuid
+from collections import Counter
 
 import cv2
 import requests
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Header
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, inspect, text
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, inspect, text, ForeignKey
+from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 from ultralytics import YOLO
 
 BASE = Path(__file__).resolve().parent
-MODEL_PATH = BASE / "model" / "best.pt"
+ROAD_DAMAGE_MODEL_PATH = BASE.parent / "road_damage" / "runs" / "detect" / "runs" / "detect" / "road_damage" / "weights" / "best.pt"
+DEFAULT_MODEL_PATH = ROAD_DAMAGE_MODEL_PATH if ROAD_DAMAGE_MODEL_PATH.exists() else BASE / "model" / "best.pt"
+MODEL_PATH = Path(os.getenv("ROAD_DAMAGE_MODEL", str(DEFAULT_MODEL_PATH)))
 UPLOAD_DIR = BASE / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 MODEL_CONFIDENCE = 0.10
@@ -71,16 +75,119 @@ class Damage(Base):
     longitude = Column(Float, nullable=False)
     address = Column(String, nullable=True)
     status = Column(String, default="Pending")
+    verification_status = Column(String, default="Pending Verification")
     image_url = Column(String)
+    original_image_url = Column(String, nullable=True)
+    annotated_image_url = Column(String, nullable=True)
+    related_report_images = Column(String, nullable=True)
     detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     latest_reported_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    verified_at = Column(DateTime, nullable=True)
+    verified_by = Column(String, nullable=True)
+    rejected_at = Column(DateTime, nullable=True)
+    rejected_by = Column(String, nullable=True)
+    rejection_reason = Column(String, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    completed_by = Column(String, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
+    officer_action = Column(String, nullable=True)
     report_count = Column(Integer, default=1, nullable=False)
+    detections = relationship(
+        "ComplaintDetection",
+        cascade="all, delete-orphan",
+        foreign_keys="[ComplaintDetection.complaint_id]",
+        order_by="ComplaintDetection.id",
+    )
+    reports = relationship("ComplaintReport", cascade="all, delete-orphan", order_by="ComplaintReport.id")
+
+
+class ComplaintReport(Base):
+    __tablename__ = "complaint_reports"
+
+    id = Column(Integer, primary_key=True)
+    complaint_id = Column(Integer, ForeignKey("damages.id"), nullable=False, index=True)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    address = Column(String, nullable=True)
+    original_image_url = Column(String, nullable=True)
+    annotated_image_url = Column(String, nullable=True)
+    image_hash = Column(String, nullable=True, index=True)
+    submitted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    detections = relationship(
+        "ComplaintDetection",
+        foreign_keys="[ComplaintDetection.report_id]",
+        order_by="ComplaintDetection.id",
+    )
+
+
+class ComplaintDetection(Base):
+    __tablename__ = "complaint_detections"
+
+    id = Column(Integer, primary_key=True)
+    complaint_id = Column(Integer, ForeignKey("damages.id"), nullable=False, index=True)
+    report_id = Column(Integer, ForeignKey("complaint_reports.id"), nullable=True, index=True)
+    damage_type = Column(String, nullable=False)
+    confidence = Column(Float, nullable=False)
+    x1 = Column(Integer, nullable=False)
+    y1 = Column(Integer, nullable=False)
+    x2 = Column(Integer, nullable=False)
+    y2 = Column(Integer, nullable=False)
+    severity = Column(String, nullable=False)
+
+
+class ComplaintHistory(Base):
+    __tablename__ = "complaint_history"
+
+    id = Column(Integer, primary_key=True)
+    complaint_id = Column(Integer, nullable=False)
+    damage_type = Column(String, nullable=False)
+    confidence = Column(Float, nullable=False)
+    severity = Column(String, nullable=False)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    address = Column(String, nullable=True)
+    original_image_url = Column(String, nullable=True)
+    annotated_image_url = Column(String, nullable=True)
+    related_report_images = Column(String, nullable=True)
+    status = Column(String, default="Completed")
+    verification_status = Column(String, default="Accepted")
+    final_status = Column(String, nullable=False)
+    rejection_reason = Column(String, nullable=True)
+    report_count = Column(Integer, default=1, nullable=False)
+    detected_at = Column(DateTime, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    rejected_at = Column(DateTime, nullable=True)
+    verified_by = Column(String, nullable=True)
+    completed_by = Column(String, nullable=True)
+    rejected_by = Column(String, nullable=True)
+    archived_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    detections = relationship("ComplaintHistoryDetection", cascade="all, delete-orphan", order_by="ComplaintHistoryDetection.id")
+
+
+class ComplaintHistoryDetection(Base):
+    __tablename__ = "complaint_history_detections"
+
+    id = Column(Integer, primary_key=True)
+    history_id = Column(Integer, ForeignKey("complaint_history.id"), nullable=False, index=True)
+    damage_type = Column(String, nullable=False)
+    confidence = Column(Float, nullable=False)
+    x1 = Column(Integer, nullable=False)
+    y1 = Column(Integer, nullable=False)
+    x2 = Column(Integer, nullable=False)
+    y2 = Column(Integer, nullable=False)
+    severity = Column(String, nullable=False)
 
 
 Base.metadata.create_all(engine)
 
 
 def seed_demo_complaints():
+    import os
+
+    if os.getenv("ENABLE_DEMO_DATA", "0").lower() not in {"1", "true", "yes", "on"}:
+        return
+
     with SessionLocal() as session:
         if session.query(Damage).count() > 0:
             return
@@ -107,16 +214,71 @@ def seed_demo_complaints():
 
 # Small migration for an existing SQLite database created by the original prototype.
 with engine.begin() as conn:
-    columns = {c["name"] for c in inspect(engine).get_columns("damages")}
-    if "address" not in columns:
+    if not inspect(engine).has_table("complaint_reports"):
+        conn.execute(text("CREATE TABLE complaint_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, complaint_id INTEGER NOT NULL, latitude FLOAT NOT NULL, longitude FLOAT NOT NULL, address VARCHAR, original_image_url VARCHAR, annotated_image_url VARCHAR, submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
+    detection_columns = {c["name"] for c in inspect(engine).get_columns("complaint_detections")}
+    if "report_id" not in detection_columns:
+        conn.execute(text("ALTER TABLE complaint_detections ADD COLUMN report_id INTEGER"))
+    report_columns = {c["name"] for c in inspect(engine).get_columns("complaint_reports")}
+    if "image_hash" not in report_columns:
+        conn.execute(text("ALTER TABLE complaint_reports ADD COLUMN image_hash VARCHAR"))
+    damage_columns = {c["name"] for c in inspect(engine).get_columns("damages")}
+    if "address" not in damage_columns:
         conn.execute(text("ALTER TABLE damages ADD COLUMN address VARCHAR"))
-    if "latest_reported_at" not in columns:
+    if "latest_reported_at" not in damage_columns:
         conn.execute(text("ALTER TABLE damages ADD COLUMN latest_reported_at DATETIME"))
         conn.execute(text("UPDATE damages SET latest_reported_at = detected_at WHERE latest_reported_at IS NULL"))
-    if "report_count" not in columns:
+    if "report_count" not in damage_columns:
         conn.execute(text("ALTER TABLE damages ADD COLUMN report_count INTEGER NOT NULL DEFAULT 1"))
+    for column_name, definition in {
+        "verification_status": "VARCHAR DEFAULT 'Pending Verification'",
+        "original_image_url": "VARCHAR",
+        "annotated_image_url": "VARCHAR",
+        "related_report_images": "VARCHAR",
+        "verified_at": "DATETIME",
+        "verified_by": "VARCHAR",
+        "rejected_at": "DATETIME",
+        "rejected_by": "VARCHAR",
+        "rejection_reason": "VARCHAR",
+        "completed_at": "DATETIME",
+        "completed_by": "VARCHAR",
+        "archived_at": "DATETIME",
+        "officer_action": "VARCHAR",
+    }.items():
+        if column_name not in damage_columns:
+            conn.execute(text(f"ALTER TABLE damages ADD COLUMN {column_name} {definition}"))
 
-seed_demo_complaints()
+    history_columns = {c["name"] for c in inspect(engine).get_columns("complaint_history")} if inspect(engine).has_table("complaint_history") else set()
+    if "complaint_history" not in inspect(engine).get_table_names():
+        conn.execute(text("CREATE TABLE complaint_history (id INTEGER PRIMARY KEY AUTOINCREMENT, complaint_id INTEGER NOT NULL, damage_type VARCHAR NOT NULL, confidence FLOAT NOT NULL, severity VARCHAR NOT NULL, latitude FLOAT NOT NULL, longitude FLOAT NOT NULL, address VARCHAR, original_image_url VARCHAR, annotated_image_url VARCHAR, related_report_images VARCHAR, status VARCHAR DEFAULT 'Completed', verification_status VARCHAR DEFAULT 'Accepted', final_status VARCHAR NOT NULL, rejection_reason VARCHAR, report_count INTEGER NOT NULL DEFAULT 1, detected_at DATETIME, verified_at DATETIME, completed_at DATETIME, rejected_at DATETIME, verified_by VARCHAR, completed_by VARCHAR, rejected_by VARCHAR, archived_at DATETIME DEFAULT CURRENT_TIMESTAMP)"))
+    else:
+        for column_name, definition in {
+            "complaint_id": "INTEGER NOT NULL DEFAULT 0",
+            "damage_type": "VARCHAR NOT NULL DEFAULT 'Unknown'",
+            "confidence": "FLOAT NOT NULL DEFAULT 0",
+            "severity": "VARCHAR NOT NULL DEFAULT 'Medium'",
+            "latitude": "FLOAT NOT NULL DEFAULT 0",
+            "longitude": "FLOAT NOT NULL DEFAULT 0",
+            "address": "VARCHAR",
+            "original_image_url": "VARCHAR",
+            "annotated_image_url": "VARCHAR",
+            "related_report_images": "VARCHAR",
+            "status": "VARCHAR DEFAULT 'Completed'",
+            "verification_status": "VARCHAR DEFAULT 'Accepted'",
+            "final_status": "VARCHAR NOT NULL DEFAULT 'Completed'",
+            "rejection_reason": "VARCHAR",
+            "report_count": "INTEGER NOT NULL DEFAULT 1",
+            "detected_at": "DATETIME",
+            "verified_at": "DATETIME",
+            "completed_at": "DATETIME",
+            "rejected_at": "DATETIME",
+            "verified_by": "VARCHAR",
+            "completed_by": "VARCHAR",
+            "rejected_by": "VARCHAR",
+            "archived_at": "DATETIME",
+        }.items():
+            if column_name not in history_columns:
+                conn.execute(text(f"ALTER TABLE complaint_history ADD COLUMN {column_name} {definition}"))
 
 # -----------------------------
 # AI MODEL
@@ -255,19 +417,328 @@ def distance_meters(latitude_a: float, longitude_a: float, latitude_b: float, lo
     return earth_radius * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
 
 
-def find_existing_complaint(d: Session, item: dict, latitude: float, longitude: float, now: datetime):
+def find_existing_complaint(
+    d: Session,
+    detections: list[dict],
+    image_hash: str,
+    latitude: float,
+    longitude: float,
+    now: datetime,
+):
     window_start = now.replace(tzinfo=None) - timedelta(hours=DUPLICATE_WINDOW_HOURS)
     candidates = d.query(Damage).filter(
-        Damage.damage_type == item["damage_type"],
         Damage.latest_reported_at >= window_start,
+        Damage.status.notin_(["Completed", "Rejected"]),
     ).all()
-    return next(
+    nearby = [
+        row for row in candidates
+        if distance_meters(latitude, longitude, row.latitude, row.longitude) <= DUPLICATE_RADIUS_METERS
+    ]
+    exact_image_match = next(
         (
-            row for row in candidates
-            if distance_meters(latitude, longitude, row.latitude, row.longitude) <= DUPLICATE_RADIUS_METERS
+            row for row in nearby
+            if any(report.image_hash == image_hash for report in (row.reports or []))
         ),
         None,
     )
+    if exact_image_match is not None:
+        return exact_image_match
+
+    submitted_types = {item["damage_type"] for item in detections}
+    for row in nearby:
+        existing_types = {item.damage_type for item in (row.detections or [])}
+        if "Multiple" in {row.damage_type, *existing_types} or submitted_types.intersection(existing_types):
+            return row
+    return None
+
+
+def parse_related_images(value: str | None):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [item for item in parsed if item]
+    except (TypeError, ValueError):
+        pass
+    return []
+
+
+def append_related_image(row: Damage, image_url: str | None):
+    if not image_url:
+        return
+    urls = parse_related_images(row.related_report_images)
+    if image_url not in urls:
+        urls.append(image_url)
+        row.related_report_images = json.dumps(urls)
+
+
+def serialize_detection(item):
+    if item is None:
+        return None
+    return {
+        "id": item.id,
+        "complaint_id": item.complaint_id,
+        "damage_type": item.damage_type,
+        "confidence": float(item.confidence),
+        "severity": item.severity,
+        "x1": item.x1,
+        "y1": item.y1,
+        "x2": item.x2,
+        "y2": item.y2,
+        "bbox": [item.x1, item.y1, item.x2, item.y2],
+        "report_id": item.report_id,
+    }
+
+
+def serialize_history_detection(item):
+    if item is None:
+        return None
+    return {
+        "id": item.id,
+        "damage_type": item.damage_type,
+        "confidence": float(item.confidence),
+        "severity": item.severity,
+        "x1": item.x1,
+        "y1": item.y1,
+        "x2": item.x2,
+        "y2": item.y2,
+        "bbox": [item.x1, item.y1, item.x2, item.y2],
+    }
+
+
+def serialize_report(report):
+    return {
+        "id": report.id,
+        "complaint_id": report.complaint_id,
+        "latitude": report.latitude,
+        "longitude": report.longitude,
+        "address": report.address,
+        "original_image_url": report.original_image_url,
+        "annotated_image_url": report.annotated_image_url,
+        "same_image": bool(report.image_hash),
+        "submitted_at": report.submitted_at.isoformat() if report.submitted_at else None,
+        "detections": [serialize_detection(item) for item in report.detections],
+    }
+
+
+def serialize_damage(row: Damage):
+    if row is None:
+        return None
+    active_image_url = row.annotated_image_url or row.image_url or row.original_image_url
+    detections = [serialize_detection(item) for item in (row.detections or [])]
+    damage_breakdown = [
+        {"damage_type": damage_type, "count": count}
+        for damage_type, count in Counter(item["damage_type"] for item in detections).most_common()
+    ]
+    return {
+        "id": row.id,
+        "damage_type": row.damage_type,
+        "confidence": row.confidence,
+        "severity": row.severity,
+        "latitude": row.latitude,
+        "longitude": row.longitude,
+        "address": row.address,
+        "status": row.status,
+        "verification_status": row.verification_status or "Pending Verification",
+        "image_url": active_image_url,
+        "annotated_image_url": row.annotated_image_url or row.image_url or row.original_image_url,
+        "original_image_url": row.original_image_url or row.image_url,
+        "related_report_images": parse_related_images(row.related_report_images),
+        "detected_at": row.detected_at.isoformat() if row.detected_at else None,
+        "latest_reported_at": row.latest_reported_at.isoformat() if row.latest_reported_at else None,
+        "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+        "verified_by": row.verified_by,
+        "rejected_at": row.rejected_at.isoformat() if row.rejected_at else None,
+        "rejected_by": row.rejected_by,
+        "rejection_reason": row.rejection_reason,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "completed_by": row.completed_by,
+        "archived_at": row.archived_at.isoformat() if row.archived_at else None,
+        "report_count": row.report_count or 1,
+        "detections": detections,
+        "detection_count": len(detections),
+        "damage_breakdown": damage_breakdown,
+        "reports": [serialize_report(report) for report in (row.reports or [])],
+    }
+
+
+def build_complaint_row(
+    detections: list[dict],
+    latitude: float,
+    longitude: float,
+    address: str,
+    original_image_url: str,
+    annotated_image_url: str,
+    status: str = "Pending",
+    verification_status: str = "Pending Verification",
+    report_count: int = 1,
+):
+    if not detections:
+        return {
+            "damage_type": "Multiple",
+            "confidence": 0.0,
+            "severity": "Low",
+            "latitude": latitude,
+            "longitude": longitude,
+            "address": address,
+            "status": status,
+            "verification_status": verification_status,
+            "image_url": annotated_image_url,
+            "original_image_url": original_image_url,
+            "annotated_image_url": annotated_image_url,
+            "report_count": report_count,
+            "detections": [],
+        }
+
+    ordered = sorted(detections, key=lambda item: item["confidence"], reverse=True)
+    severity_levels = {"Low": 1, "Medium": 2, "High": 3, "Critical": 4}
+    highest_severity = max((item["severity"] for item in ordered), key=lambda value: severity_levels.get(value, 0))
+    damage_type = "Multiple" if len(detections) > 1 else ordered[0]["damage_type"]
+    return {
+        "damage_type": damage_type,
+        "confidence": float(ordered[0]["confidence"]),
+        "severity": highest_severity,
+        "latitude": latitude,
+        "longitude": longitude,
+        "address": address,
+        "status": status,
+        "image_url": annotated_image_url,
+        "original_image_url": original_image_url,
+        "annotated_image_url": annotated_image_url,
+        "report_count": report_count,
+        "detections": [
+            {
+                "complaint_id": None,
+                "damage_type": item["damage_type"],
+                "confidence": float(item["confidence"]),
+                "severity": item["severity"],
+                "x1": item["bbox"][0],
+                "y1": item["bbox"][1],
+                "x2": item["bbox"][2],
+                "y2": item["bbox"][3],
+                "bbox": item["bbox"],
+            }
+            for item in ordered
+        ],
+    }
+
+
+def save_complaint_detections(d: Session, complaint_id: int, detections: list[dict], report_id: int | None = None):
+    if not detections:
+        return
+    for item in detections:
+        d.add(
+            ComplaintDetection(
+                complaint_id=complaint_id,
+                report_id=report_id,
+                damage_type=item["damage_type"],
+                confidence=float(item["confidence"]),
+                x1=int(item["bbox"][0]),
+                y1=int(item["bbox"][1]),
+                x2=int(item["bbox"][2]),
+                y2=int(item["bbox"][3]),
+                severity=item["severity"],
+            )
+        )
+
+
+def create_history_records_for_complaint(d: Session, row: Damage, final_status: str, reason: str | None = None):
+    existing = d.query(ComplaintHistory).filter(ComplaintHistory.complaint_id == row.id, ComplaintHistory.final_status == final_status).first()
+    if existing is None:
+        existing = ComplaintHistory(
+            complaint_id=row.id,
+            damage_type=row.damage_type,
+            confidence=row.confidence,
+            severity=row.severity,
+            latitude=row.latitude,
+            longitude=row.longitude,
+            address=row.address,
+            original_image_url=row.original_image_url or row.image_url,
+            annotated_image_url=row.annotated_image_url or row.image_url,
+            related_report_images=row.related_report_images,
+            status=row.status,
+            verification_status=row.verification_status or "Accepted",
+            final_status=final_status,
+            rejection_reason=reason,
+            report_count=row.report_count or 1,
+            detected_at=row.detected_at,
+            verified_at=row.verified_at,
+            completed_at=row.completed_at,
+            rejected_at=row.rejected_at,
+            verified_by=row.verified_by,
+            completed_by=row.completed_by,
+            rejected_by=row.rejected_by,
+            archived_at=datetime.now(timezone.utc),
+        )
+        d.add(existing)
+        d.flush()
+    else:
+        existing.damage_type = row.damage_type
+        existing.confidence = row.confidence
+        existing.severity = row.severity
+        existing.latitude = row.latitude
+        existing.longitude = row.longitude
+        existing.address = row.address
+        existing.original_image_url = row.original_image_url or row.image_url
+        existing.annotated_image_url = row.annotated_image_url or row.image_url
+        existing.related_report_images = row.related_report_images
+        existing.status = row.status
+        existing.verification_status = row.verification_status or "Accepted"
+        existing.final_status = final_status
+        existing.rejection_reason = reason or existing.rejection_reason
+        existing.report_count = row.report_count or 1
+        existing.detected_at = row.detected_at
+        existing.verified_at = row.verified_at
+        existing.completed_at = row.completed_at
+        existing.rejected_at = row.rejected_at
+        existing.verified_by = row.verified_by
+        existing.completed_by = row.completed_by
+        existing.rejected_by = row.rejected_by
+        existing.archived_at = datetime.now(timezone.utc)
+
+    for history_detection in list(existing.detections):
+        d.delete(history_detection)
+    for detection in d.query(ComplaintDetection).filter(ComplaintDetection.complaint_id == row.id).all():
+        existing.detections.append(
+            ComplaintHistoryDetection(
+                damage_type=detection.damage_type,
+                confidence=float(detection.confidence),
+                x1=int(detection.x1),
+                y1=int(detection.y1),
+                x2=int(detection.x2),
+                y2=int(detection.y2),
+                severity=detection.severity,
+            )
+        )
+    return existing
+
+
+def get_active_damages_query(d: Session):
+    return d.query(Damage).filter(Damage.status.notin_(["Completed", "Rejected"]))
+
+
+def archive_complaint(d: Session, row: Damage, final_status: str, reason: str | None = None, officer_name: str | None = None):
+    if row is None:
+        return None
+    if row.status == final_status and row.archived_at:
+        return None
+
+    existing = create_history_records_for_complaint(d, row, final_status, reason)
+
+    row.archived_at = datetime.now(timezone.utc)
+    if final_status == "Completed":
+        row.status = "Completed"
+        row.completed_at = row.completed_at or datetime.now(timezone.utc)
+        row.completed_by = officer_name or row.completed_by
+    else:
+        row.status = "Rejected"
+        row.rejected_at = row.rejected_at or datetime.now(timezone.utc)
+        row.rejected_by = officer_name or row.rejected_by
+        row.rejection_reason = reason or row.rejection_reason
+    row.officer_action = final_status
+    d.commit()
+    return existing
 
 
 def predict_damage(image, width: int, height: int):
@@ -521,6 +992,7 @@ async def detect(
     original_name = f"{uuid.uuid4().hex}{suffix}"
     original_path = UPLOAD_DIR / original_name
     original_path.write_bytes(content)
+    image_hash = hashlib.sha256(content).hexdigest()
 
     image = cv2.imread(str(original_path))
     if image is None:
@@ -558,62 +1030,108 @@ async def detect(
 
     annotated_name = f"annotated_{uuid.uuid4().hex}.jpg"
     cv2.imwrite(str(UPLOAD_DIR / annotated_name), image)
-    image_url = f"/uploads/{annotated_name}"
+    original_image_url = f"/uploads/{original_name}"
+    annotated_image_url = f"/uploads/{annotated_name}"
     address = address_override.strip() if address_override and address_override.strip() else reverse_geocode(latitude, longitude)
 
-    # Every detected object becomes a complaint record linked to the same report image/location.
     now = datetime.now(timezone.utc)
-    created_ids = []
+    complaint_summary = build_complaint_row(
+        detections=detections,
+        latitude=latitude,
+        longitude=longitude,
+        address=address,
+        original_image_url=original_image_url,
+        annotated_image_url=annotated_image_url,
+        status="Pending",
+        verification_status="Pending Verification",
+        report_count=1,
+    )
+    primary = max(detections, key=lambda item: item["confidence"]) if detections else None
+    complaint_id = None
     linked_ids = []
-    updated_existing_ids = set()
-    processed_detections = []
-    for item in detections:
-        existing = find_existing_complaint(d, item, latitude, longitude, now)
-        if existing is not None and existing.id not in created_ids:
-            if existing.id not in updated_existing_ids:
-                existing.report_count = (existing.report_count or 1) + 1
-                existing.latest_reported_at = now
-                existing.confidence = max(existing.confidence, item["confidence"])
-                existing.image_url = image_url
-                updated_existing_ids.add(existing.id)
-                linked_ids.append(existing.id)
-            item.update({"complaint_id": existing.id, "linked": True, "report_count": existing.report_count})
+    created_ids = []
+
+    if primary:
+        existing = find_existing_complaint(d, detections, image_hash, latitude, longitude, now)
+        if existing is not None:
+            existing.report_count = (existing.report_count or 1) + 1
+            existing.latest_reported_at = now
+            existing.confidence = max(float(existing.confidence or 0.0), float(primary["confidence"]))
+            existing.severity = complaint_summary["severity"]
+            existing.damage_type = "Multiple" if len(detections) > 1 else existing.damage_type or complaint_summary["damage_type"]
+            existing.annotated_image_url = annotated_image_url
+            existing.original_image_url = existing.original_image_url or original_image_url
+            append_related_image(existing, original_image_url)
+            append_related_image(existing, annotated_image_url)
+            existing.image_url = existing.annotated_image_url or existing.image_url or annotated_image_url
+            complaint_id = existing.id
+            linked_ids.append(existing.id)
+            report = ComplaintReport(
+                complaint_id=existing.id,
+                latitude=latitude,
+                longitude=longitude,
+                address=address,
+                original_image_url=original_image_url,
+                annotated_image_url=annotated_image_url,
+                image_hash=image_hash,
+                submitted_at=now,
+            )
+            d.add(report)
+            d.flush()
+            save_complaint_detections(d, existing.id, complaint_summary["detections"], report.id)
         else:
             row = Damage(
-                damage_type=item["damage_type"],
-                confidence=item["confidence"],
-                severity=item["severity"],
+                damage_type=complaint_summary["damage_type"],
+                confidence=float(complaint_summary["confidence"]),
+                severity=complaint_summary["severity"],
                 latitude=latitude,
                 longitude=longitude,
                 address=address,
                 status="Pending",
-                image_url=image_url,
+                verification_status="Pending Verification",
+                image_url=annotated_image_url,
+                original_image_url=original_image_url,
+                annotated_image_url=annotated_image_url,
                 detected_at=now,
                 latest_reported_at=now,
                 report_count=1,
             )
             d.add(row)
             d.flush()
+            complaint_id = row.id
             created_ids.append(row.id)
-            item.update({"complaint_id": row.id, "linked": False, "report_count": 1})
-        processed_detections.append(item)
+            report = ComplaintReport(
+                complaint_id=row.id,
+                latitude=latitude,
+                longitude=longitude,
+                address=address,
+                original_image_url=original_image_url,
+                annotated_image_url=annotated_image_url,
+                image_hash=image_hash,
+                submitted_at=now,
+            )
+            d.add(report)
+            d.flush()
+            save_complaint_detections(d, row.id, complaint_summary["detections"], report.id)
+
     d.commit()
 
     complaint_ids = list(dict.fromkeys(created_ids + linked_ids))
-    complaint_id = complaint_ids[0] if complaint_ids else None
     return {
         "count": len(detections),
         "complaint_id": complaint_id,
         "complaint_ids": complaint_ids,
         "created_complaint_ids": created_ids,
         "linked_complaint_ids": linked_ids,
-        "detections": processed_detections,
-        "image_url": image_url,
+        "detections": complaint_summary["detections"],
+        "image_url": annotated_image_url,
+        "original_image_url": original_image_url,
+        "annotated_image_url": annotated_image_url,
         "latitude": latitude,
         "longitude": longitude,
         "location_accuracy_m": location_accuracy_m,
         "address": address,
-        "complaint_registered": len(complaint_ids) > 0,
+        "complaint_registered": bool(complaint_id),
         "duplicate_policy": {
             "radius_m": DUPLICATE_RADIUS_METERS,
             "window_hours": DUPLICATE_WINDOW_HOURS,
@@ -633,23 +1151,144 @@ async def detect(
 # -----------------------------
 @app.get("/api/damages")
 def damages(_: dict = Depends(require_government), d: Session = Depends(db)):
-    return d.query(Damage).order_by(Damage.id.desc()).all()
+    rows = get_active_damages_query(d).order_by(Damage.id.desc()).all()
+    return [serialize_damage(row) for row in rows]
 
 
-@app.get("/api/dashboard/stats")
-def stats(_: dict = Depends(require_government), d: Session = Depends(db)):
-    rows = d.query(Damage).all()
+@app.get("/api/damages/{damage_id}")
+def get_damage(damage_id: int, _: dict = Depends(require_government), d: Session = Depends(db)):
+    row = d.query(Damage).filter(Damage.id == damage_id).first()
+    if not row:
+        raise HTTPException(404, "Complaint not found")
+    return serialize_damage(row)
+
+
+@app.get("/api/damages/{damage_id}/image")
+def get_damage_evidence(damage_id: int, _: dict = Depends(require_government), d: Session = Depends(db)):
+    row = d.query(Damage).filter(Damage.id == damage_id).first()
+    if not row:
+        raise HTTPException(404, "Complaint not found")
     return {
-        "total": len(rows),
-        "critical": sum(x.severity == "Critical" for x in rows),
-        "high": sum(x.severity == "High" for x in rows),
-        "medium": sum(x.severity == "Medium" for x in rows),
-        "low": sum(x.severity == "Low" for x in rows),
-        "pending": sum(x.status == "Pending" for x in rows),
-        "verified": sum(x.status == "Verified" for x in rows),
-        "in_progress": sum(x.status == "In Progress" for x in rows),
-        "repaired": sum(x.status == "Repaired" for x in rows),
+        "complaint_id": row.id,
+        "damage_type": row.damage_type,
+        "confidence": row.confidence,
+        "severity": row.severity,
+        "address": row.address,
+        "latitude": row.latitude,
+        "longitude": row.longitude,
+        "report_count": row.report_count or 1,
+        "original_image_url": row.original_image_url or row.image_url,
+        "annotated_image_url": row.annotated_image_url or row.image_url,
+        "related_report_images": parse_related_images(row.related_report_images),
+        "detections": [serialize_detection(item) for item in (row.detections or [])],
+        "detection_count": len(row.detections or []),
     }
+
+
+@app.get("/api/damages/{damage_id}/reports")
+def get_damage_reports(damage_id: int, _: dict = Depends(require_government), d: Session = Depends(db)):
+    row = d.query(Damage).filter(Damage.id == damage_id).first()
+    if not row:
+        raise HTTPException(404, "Complaint not found")
+    report_images = parse_related_images(row.related_report_images)
+    return {
+        "complaint_id": row.id,
+        "report_count": row.report_count or 1,
+        "master_complaint": serialize_damage(row),
+        "related_report_images": report_images,
+        "detections": [serialize_detection(item) for item in (row.detections or [])],
+    }
+
+
+@app.post("/api/damages/{damage_id}/verify")
+def verify_damage(
+    damage_id: int,
+    payload: dict | None = Body(default=None),
+    _: dict = Depends(require_government),
+    d: Session = Depends(db),
+):
+    row = d.query(Damage).filter(Damage.id == damage_id).first()
+    if not row:
+        raise HTTPException(404, "Complaint not found")
+    if row.status in {"Completed", "Rejected"}:
+        raise HTTPException(400, "This complaint is already archived in history.")
+    row.verification_status = "Accepted"
+    row.status = "In Progress"
+    row.verified_at = datetime.now(timezone.utc)
+    row.verified_by = _.get("sub") or "government_officer"
+    row.officer_action = "verified"
+    d.commit()
+    d.refresh(row)
+    return {"message": f"Complaint #{row.id} verified successfully.", "complaint": serialize_damage(row)}
+
+
+@app.post("/api/damages/{damage_id}/reject")
+def reject_damage(
+    damage_id: int,
+    payload: dict | None = Body(default=None),
+    _: dict = Depends(require_government),
+    d: Session = Depends(db),
+):
+    row = d.query(Damage).filter(Damage.id == damage_id).first()
+    if not row:
+        raise HTTPException(404, "Complaint not found")
+    if row.status in {"Completed", "Rejected"}:
+        raise HTTPException(400, "This complaint is already archived in history.")
+    if payload is None:
+        raise HTTPException(400, "A rejection reason is required.")
+    reason = (payload.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(400, "A rejection reason is required.")
+
+    row.verification_status = "Rejected"
+    row.status = "Rejected"
+    row.rejected_at = datetime.now(timezone.utc)
+    row.rejected_by = _.get("sub") or "government_officer"
+    row.rejection_reason = reason
+    row.officer_action = "rejected"
+    archive_complaint(d, row, "Rejected", reason, row.rejected_by)
+    d.commit()
+    d.refresh(row)
+    return {"message": f"Complaint #{row.id} rejected successfully.", "complaint": serialize_damage(row)}
+
+
+@app.get("/api/complaints/history")
+def complaint_history(_: dict = Depends(require_government), d: Session = Depends(db)):
+    rows = d.query(ComplaintHistory).order_by(ComplaintHistory.archived_at.desc()).all()
+    result = []
+    for row in rows:
+        archived_complaint = d.query(Damage).filter(Damage.id == row.complaint_id).first()
+        result.append({
+            "id": row.id,
+            "complaint_id": row.complaint_id,
+            "damage_type": row.damage_type,
+            "confidence": row.confidence,
+            "severity": row.severity,
+            "latitude": row.latitude,
+            "longitude": row.longitude,
+            "address": row.address,
+            "final_status": row.final_status,
+            "status": row.status,
+            "verification_status": row.verification_status,
+            "image_url": row.annotated_image_url or row.original_image_url,
+            "annotated_image_url": row.annotated_image_url or row.original_image_url,
+            "original_image_url": row.original_image_url,
+            "related_report_images": parse_related_images(row.related_report_images),
+            "report_count": row.report_count or 1,
+            "detected_at": row.detected_at.isoformat() if row.detected_at else None,
+            "verified_at": row.verified_at.isoformat() if row.verified_at else None,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+            "rejected_at": row.rejected_at.isoformat() if row.rejected_at else None,
+            "rejection_reason": row.rejection_reason,
+            "archived_at": row.archived_at.isoformat() if row.archived_at else None,
+            "verified_by": row.verified_by,
+            "completed_by": row.completed_by,
+            "rejected_by": row.rejected_by,
+            "detections": [serialize_history_detection(item) for item in (row.detections or [])],
+            "detection_count": len(row.detections or []),
+            "reports": [serialize_report(report) for report in (archived_complaint.reports or [])] if archived_complaint else [],
+        })
+    return result
 
 
 @app.patch("/api/damages/{damage_id}/status")
@@ -659,13 +1298,60 @@ def update_status(
     _: dict = Depends(require_government),
     d: Session = Depends(db),
 ):
-    allowed = {"Pending", "Verified", "Rejected", "Assigned", "In Progress", "Repaired"}
+    allowed = {"Pending", "In Progress", "Completed"}
     if status not in allowed:
         raise HTTPException(400, "Invalid status")
     row = d.query(Damage).filter(Damage.id == damage_id).first()
     if not row:
-        raise HTTPException(404, "Damage not found")
+        raise HTTPException(404, "Complaint not found")
+    if row.status in {"Completed", "Rejected"}:
+        raise HTTPException(400, "This complaint is already archived in the history log.")
+    if row.verification_status != "Accepted" and status != "Pending":
+        raise HTTPException(403, "Complaint must be accepted before status changes can be made.")
+    if status == "In Progress" and row.status != "Pending":
+        raise HTTPException(400, "Complaint must be Pending before work can start.")
+    if status == "Completed" and row.status != "In Progress":
+        raise HTTPException(400, "Complaint must be In Progress before it can be completed.")
+
     row.status = status
+    row.officer_action = status.lower().replace(" ", "_")
+    if status == "Pending":
+        row.verification_status = "Accepted"
+        row.verified_at = row.verified_at or datetime.now(timezone.utc)
+    elif status == "In Progress":
+        row.verification_status = "Accepted"
+    elif status == "Completed":
+        row.completed_at = datetime.now(timezone.utc)
+        row.completed_by = _.get("sub") or "government_officer"
+        row.verification_status = "Accepted"
+        archive_complaint(d, row, "Completed", None, row.completed_by)
     d.commit()
     d.refresh(row)
-    return row
+    return {"message": f"Complaint #{row.id} updated to {status}.", "complaint": serialize_damage(row)}
+
+
+@app.get("/api/dashboard/stats")
+def stats(_: dict = Depends(require_government), d: Session = Depends(db)):
+    rows = get_active_damages_query(d).all()
+    history_rows = d.query(ComplaintHistory).all()
+    return {
+        "total": len(rows),
+        "total_active": len(rows),
+        "critical": sum(x.severity == "Critical" for x in rows),
+        "high": sum(x.severity == "High" for x in rows),
+        "medium": sum(x.severity == "Medium" for x in rows),
+        "low": sum(x.severity == "Low" for x in rows),
+        "pending": sum(x.status == "Pending" for x in rows),
+        "pending_verification": sum(x.verification_status in {"Pending Verification", "Pending"} for x in rows),
+        "verified": sum(x.verification_status == "Accepted" for x in rows),
+        "in_progress": sum(x.status == "In Progress" for x in rows),
+        "completed": sum(x.final_status == "Completed" for x in history_rows),
+        "rejected": sum(x.final_status == "Rejected" for x in history_rows),
+        "total_reports": sum((x.report_count or 1) for x in rows),
+        "active_complaints": len(rows),
+        "total_active": len(rows),
+        "pending_verification": sum(x.verification_status in {"Pending Verification", "Pending"} for x in rows),
+        "in_progress": sum(x.status == "In Progress" for x in rows),
+        "completed": sum(x.final_status == "Completed" for x in history_rows),
+        "rejected": sum(x.final_status == "Rejected" for x in history_rows),
+    }

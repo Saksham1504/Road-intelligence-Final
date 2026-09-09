@@ -5,5 +5,11 @@ backend/runs/
 backend/uploads/
 frontend/node_modules/
 frontend/dist/
+road_damage/data/images/
+road_damage/data/labels/
+road_damage/data/labels-YOLO/
+road_damage/road_damage/images/
+road_damage/road_damage/labels/
+road_damage/runs/
 *.log
 .DS_Store

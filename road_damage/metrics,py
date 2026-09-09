@@ -1,0 +1,48 @@
+from pathlib import Path
+from ultralytics import YOLO
+
+
+def main():
+    base_dir = Path(__file__).resolve().parent
+    data_yaml = base_dir / "road_damage" / "data.yaml"
+
+    weights_path = (
+        base_dir
+        / "runs"
+        / "detect"
+        / "runs"
+        / "detect"
+        / "road_damage"
+        / "weights"
+        / "best.pt"
+    )
+
+    model = YOLO(str(weights_path))
+    metrics = model.val(data=str(data_yaml), device=0)
+
+    print("\n" + "=" * 55)
+    print("           OVERALL MODEL METRICS")
+    print("=" * 55)
+    print(f"Precision (P):   {metrics.box.mp:.4f}")
+    print(f"Recall (R):      {metrics.box.mr:.4f}")
+    print(f"mAP@50:          {metrics.box.map50:.4f}")
+    print(f"mAP@50-95:       {metrics.box.map:.4f}")
+
+    print("\n" + "=" * 55)
+    print("           PER-CLASS BREAKDOWN")
+    print("=" * 55)
+    print(f"{'Class':<12} | {'Precision':<10} | {'Recall':<10} | {'mAP50':<10} | {'mAP50-95':<10}")
+    print("-" * 62)
+
+    class_names = metrics.names
+    for idx, c_idx in enumerate(metrics.box.ap_class_index):
+        name = class_names[c_idx]
+        p = metrics.box.p[idx]
+        r = metrics.box.r[idx]
+        map50 = metrics.box.ap50[idx]
+        map5095 = metrics.box.ap[idx]
+        print(f"{name:<12} | {p:<10.4f} | {r:<10.4f} | {map50:<10.4f} | {map5095:<10.4f}")
+
+
+if __name__ == "__main__":
+    main()

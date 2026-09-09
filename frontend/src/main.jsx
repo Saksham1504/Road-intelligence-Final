@@ -110,6 +110,12 @@ function App() {
 
   const [stats, setStats] = useState({});
   const [rows, setRows] = useState([]);
+  const [historyRows, setHistoryRows] = useState([]);
+  const [selectedComplaint, setSelectedComplaint] = useState(null);
+  const [rejectingComplaint, setRejectingComplaint] = useState(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [notice, setNotice] = useState("");
+  const [historyView, setHistoryView] = useState(false);
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
   const [latitude, setLatitude] = useState(null);
@@ -146,13 +152,15 @@ function App() {
   async function loadGovernment() {
     try {
       const headers = { Authorization: `Bearer ${govToken}` };
-      const [s, r] = await Promise.all([
+      const [s, r, h] = await Promise.all([
         fetch(API + "/api/dashboard/stats", { headers }),
-        fetch(API + "/api/damages", { headers })
+        fetch(API + "/api/damages", { headers }),
+        fetch(API + "/api/complaints/history", { headers })
       ]);
-      if (s.status === 401 || r.status === 401) return logout();
+      if (s.status === 401 || r.status === 401 || h.status === 401) return logout();
       setStats(await s.json());
       setRows(await r.json());
+      setHistoryRows(await h.json());
     } catch (_) {
       setLoginMsg("FastAPI backend is not reachable on port 8000.");
     }
@@ -319,16 +327,66 @@ function App() {
     }
   }
 
-  async function status(id, value) {
+  async function verifyComplaint(id) {
+    try {
+      const r = await fetch(`${API}/api/damages/${id}/verify`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${govToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 401) return logout();
+      if (!r.ok) throw new Error(data.detail || "Verification failed");
+      setNotice(`Complaint #${id} accepted successfully.`);
+      await loadGovernment();
+    } catch (error) {
+      setNotice(error.message || "Unable to verify complaint.");
+    }
+  }
+
+  async function rejectComplaint(id, reason) {
+    const trimmed = reason.trim();
+    if (!trimmed) {
+      setNotice("A rejection reason is required before the complaint can be archived.");
+      return;
+    }
+    try {
+      const r = await fetch(`${API}/api/damages/${id}/reject`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${govToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ reason: trimmed })
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 401) return logout();
+      if (!r.ok) throw new Error(data.detail || "Rejection failed");
+      setNotice(`Complaint #${id} rejected successfully.`);
+      setRejectingComplaint(null);
+      setRejectReason("");
+      await loadGovernment();
+    } catch (error) {
+      setNotice(error.message || "Unable to reject complaint.");
+    }
+  }
+
+  async function updateWorkflowStatus(id, value) {
     try {
       const r = await fetch(`${API}/api/damages/${id}/status?status=${encodeURIComponent(value)}`, {
         method: "PATCH",
         headers: { Authorization: `Bearer ${govToken}` }
       });
+      const data = await r.json().catch(() => ({}));
       if (r.status === 401) return logout();
+      if (!r.ok) throw new Error(data.detail || "Unable to update complaint status.");
+      setNotice(`Complaint #${id} moved to ${value}.`);
       await loadGovernment();
-    } catch (_) {
-      setLoginMsg("Unable to update complaint status.");
+    } catch (error) {
+      setNotice(error.message || "Unable to update complaint status.");
     }
   }
 
@@ -433,12 +491,15 @@ function App() {
           <div className="gov-heading"><div><span className="eyebrow">AUTHORIZED GOVERNMENT PORTAL</span><h2>Road Maintenance Command Center</h2><p>Review citizen reports, verify locations and track repair progress.</p></div><div className="officer-chip">🔐 Government session active<br/><small>{username}</small></div></div>
 
           <div className="cards">
-            <Card t="Total Issues" v={stats.total || 0} />
-            <Card t="Critical" v={stats.critical || 0} c="critical" />
-            <Card t="High" v={stats.high || 0} c="high" />
-            <Card t="Medium" v={stats.medium || 0} c="medium" />
-            <Card t="Pending Verification" v={stats.pending || 0} />
+            <Card t="Total Active Complaints" v={stats.total_active || stats.total || 0} />
+            <Card t="Pending Verification" v={stats.pending_verification || 0} />
+            <Card t="In Progress" v={stats.in_progress || 0} />
+            <Card t="Completed" v={stats.completed || 0} />
+            <Card t="Rejected" v={stats.rejected || 0} />
+            <Card t="Total Reports" v={stats.total_reports || 0} />
           </div>
+
+          {notice && <div className="notice-banner">{notice}</div>}
 
           <section className="panel map-panel">
             <div className="section-title"><div><span className="eyebrow">GIS VERIFICATION</span><h2>🛰️ Damage Location & Satellite Verification</h2></div><span className="secure-chip">🔒 OFFICER ONLY</span></div>
@@ -453,10 +514,100 @@ function App() {
           </section>
 
           <section className="panel">
-            <div className="section-title"><div><span className="eyebrow">CASE MANAGEMENT</span><h2>🚨 Road Damage Complaints</h2></div><span className="muted">{rows.length} records</span></div>
-            <div className="table"><table><thead><tr><th>ID</th><th>Damage</th><th>Reports</th><th>Latest Report</th><th>Confidence</th><th>Severity</th><th>Road Address</th><th>GPS</th><th>Status</th></tr></thead><tbody>{rows.map(r => { const reportCount = r.report_count || 1; const reportedAt = formatComplaintDateParts(r.latest_reported_at || r.detected_at); return <tr key={r.id}><td><b>#{r.id}</b></td><td><strong>{r.damage_type}</strong></td><td><div className={`report-count ${reportCount > 1 ? "report-count-linked" : ""}`}><b>{reportCount}</b><span>{reportCount === 1 ? "report" : "reports"}</span></div>{reportCount > 1 && <small className="linked-note">linked reports</small>}</td><td><div className="latest-report"><b>{reportedAt.date}</b><span>{reportedAt.time}</span></div></td><td>{(r.confidence * 100).toFixed(0)}%</td><td><span className={`badge ${r.severity.toLowerCase()}`}>{r.severity}</span></td><td className="address-cell">{r.address || "Address unavailable"}</td><td className="gps-cell">{r.latitude.toFixed(5)}<br/>{r.longitude.toFixed(5)}</td><td><select value={r.status} onChange={e => status(r.id, e.target.value)}><option>Pending</option><option>Verified</option><option>Rejected</option><option>Assigned</option><option>In Progress</option><option>Repaired</option></select></td></tr>; })}</tbody></table></div>
+            <div className="section-title"><div><span className="eyebrow">CASE MANAGEMENT</span><h2>🚨 Road Damage Complaints</h2></div><div className="history-toggle-wrap"><button className="history-toggle" onClick={() => setHistoryView(false)}>Active</button><button className="history-toggle secondary" onClick={() => setHistoryView(true)}>History / Completed & Rejected</button></div></div>
+
+            {!historyView ? (
+              <div className="table"><table><thead><tr><th>ID</th><th>Damage</th><th>Reports</th><th>Latest Report</th><th>Confidence</th><th>Severity</th><th>Road Address</th><th>GPS</th><th>Evidence</th><th>Verification / Status</th></tr></thead><tbody>{rows.map(r => { const reportCount = r.report_count || 1; const reportedAt = formatComplaintDateParts(r.latest_reported_at || r.detected_at); const accepted = r.verification_status === "Accepted"; const canVerify = !accepted && r.verification_status !== "Rejected" && r.status !== "Completed" && r.status !== "Rejected"; const damageBreakdown = (r.damage_breakdown || []).map(item => `${item.damage_type} x${item.count}`).join(", "); return <tr key={r.id}><td><b>#{r.id}</b></td><td><button type="button" className="damage-link" onClick={() => setSelectedComplaint(r)}>{r.damage_type}</button>{r.detection_count > 0 && <small className="linked-note damage-summary">{r.detection_count} detections{damageBreakdown ? `: ${damageBreakdown}` : ""}</small>}</td><td><div className={`report-count ${reportCount > 1 ? "report-count-linked" : ""}`}><b>{reportCount}</b><span>{reportCount === 1 ? "report" : "reports"}</span></div>{reportCount > 1 && <small className="linked-note">linked reports</small>}</td><td><div className="latest-report"><b>{reportedAt.date}</b><span>{reportedAt.time}</span></div></td><td>{(r.confidence * 100).toFixed(0)}%</td><td><span className={`badge ${r.severity.toLowerCase()}`}>{r.severity}</span></td><td className="address-cell">{r.address || "Address unavailable"}</td><td className="gps-cell">{r.latitude.toFixed(5)}<br/>{r.longitude.toFixed(5)}</td><td><button className="mini-btn" onClick={() => setSelectedComplaint(r)}>View</button></td><td>{canVerify ? <div className="verification-actions"><span className="status-label">Pending</span><button className="action-btn primary" onClick={() => verifyComplaint(r.id)}>Verify</button><button className="action-btn danger" onClick={() => setRejectingComplaint(r)}>Reject</button></div> : r.status === "Pending" && accepted ? <div className="status-actions"><span className="status-label">Pending</span><button className="action-btn primary" onClick={() => updateWorkflowStatus(r.id, "In Progress")}>In Progress</button></div> : r.status === "In Progress" ? <div className="status-actions"><span className="status-label">In Progress</span><button className="action-btn primary" onClick={() => updateWorkflowStatus(r.id, "Completed")}>Completed</button></div> : <span className="status-label">{r.status}</span>}</td></tr>; })}</tbody></table></div>
+            ) : (
+              <div className="table"><table><thead><tr><th>ID</th><th>Damage</th><th>Final Status</th><th>Address</th><th>Reports</th><th>Date/Time</th><th>Reason</th><th>Evidence</th></tr></thead><tbody>{historyRows.map(item => <tr key={`${item.complaint_id}-${item.final_status}-${item.archived_at || item.rejected_at || item.completed_at}`}><td><b>#{item.complaint_id}</b></td><td><strong>{item.damage_type}</strong></td><td><span className={`badge ${item.final_status === "Rejected" ? "rejected" : "completed"}`}>{item.final_status}</span></td><td className="address-cell">{item.address || "Address unavailable"}</td><td>{item.report_count || 1}</td><td>{formatComplaintDate(item.completed_at || item.rejected_at || item.detected_at)}</td><td>{item.final_status === "Rejected" ? (item.rejection_reason || "-") : "-"}</td><td><button className="mini-btn" onClick={() => setSelectedComplaint({ ...item, id: item.complaint_id, verification_status: item.final_status, original_image_url: item.original_image_url, annotated_image_url: item.annotated_image_url, related_report_images: item.related_report_images || [] })}>View Evidence</button></td></tr>)}</tbody></table></div>
+            )}
           </section>
         </main>
+      )}
+
+      {selectedComplaint && (
+        <div className="modal-backdrop" onMouseDown={() => setSelectedComplaint(null)}>
+          <div className="evidence-modal" onMouseDown={e => e.stopPropagation()}>
+            <button className="close" onClick={() => setSelectedComplaint(null)}>×</button>
+            <div className="section-title"><div><span className="eyebrow">EVIDENCE REVIEW</span><h2>Complaint #{selectedComplaint.id}</h2></div><span className="secure-chip">Verified evidence</span></div>
+            <div className="evidence-workflow">
+              <strong>Status: {selectedComplaint.status || selectedComplaint.final_status || "Pending"}</strong>
+              {selectedComplaint.status === "Pending" && selectedComplaint.verification_status !== "Accepted" && <div className="verification-actions"><button className="action-btn primary" onClick={() => { verifyComplaint(selectedComplaint.id); setSelectedComplaint(null); }}>Verify</button><button className="action-btn danger" onClick={() => { setRejectingComplaint(selectedComplaint); setRejectReason(""); setSelectedComplaint(null); }}>Reject</button></div>}
+              {selectedComplaint.status === "In Progress" && <button className="action-btn primary" onClick={() => updateWorkflowStatus(selectedComplaint.id, "Completed")}>Completed</button>}
+            </div>
+            <div className="evidence-grid">
+              <div className="evidence-card">
+                <strong>Original Citizen Image</strong>
+                {selectedComplaint.original_image_url || selectedComplaint.image_url ? <img src={`${API}${selectedComplaint.original_image_url || selectedComplaint.image_url}`} alt="Original complaint evidence" /> : <div className="no-image">No original image available</div>}
+              </div>
+              <div className="evidence-card">
+                <strong>AI Detection Result</strong>
+                {selectedComplaint.annotated_image_url || selectedComplaint.image_url ? <img src={`${API}${selectedComplaint.annotated_image_url || selectedComplaint.image_url}`} alt="AI annotated complaint evidence" /> : <div className="no-image">AI annotated image unavailable</div>}
+              </div>
+            </div>
+
+            {Array.isArray(selectedComplaint.reports) && selectedComplaint.reports.length > 0 && (
+              <div className="submitted-reports">
+                <h3>Citizen Reports ({selectedComplaint.reports.length})</h3>
+                {selectedComplaint.reports.map((report, index) => (
+                  <div className="submitted-report" key={report.id}>
+                    <h4>Report {index + 1} · {formatComplaintDate(report.submitted_at)}</h4>
+                    <div className="evidence-grid">
+                      <div className="evidence-card"><strong>Original Image</strong><img src={`${API}${report.original_image_url}`} alt={`Original citizen report ${index + 1}`} /></div>
+                      <div className="evidence-card"><strong>AI-Detected Image</strong><img src={`${API}${report.annotated_image_url}`} alt={`AI result for report ${index + 1}`} /></div>
+                    </div>
+                    <ul>{report.detections.map((d, detectionIndex) => <li key={`${report.id}-${detectionIndex}`}><strong>{d.damage_type}</strong> · {(d.confidence * 100).toFixed(0)}% · {d.severity}</li>)}</ul>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="evidence-meta-grid">
+              <div className="meta-item"><span>Damage type</span><strong>{selectedComplaint.damage_type || "Multiple"}</strong></div>
+              <div className="meta-item"><span>AI confidence</span><strong>{(selectedComplaint.confidence * 100).toFixed(0)}%</strong></div>
+              <div className="meta-item"><span>Severity</span><strong>{selectedComplaint.severity}</strong></div>
+              <div className="meta-item"><span>Road address</span><strong>{selectedComplaint.address || "Address unavailable"}</strong></div>
+              <div className="meta-item"><span>Latitude</span><strong>{selectedComplaint.latitude?.toFixed(6) ?? "-"}</strong></div>
+              <div className="meta-item"><span>Longitude</span><strong>{selectedComplaint.longitude?.toFixed(6) ?? "-"}</strong></div>
+              <div className="meta-item"><span>Report count</span><strong>{selectedComplaint.report_count || 1}</strong></div>
+              <div className="meta-item"><span>Latest report</span><strong>{formatComplaintDate(selectedComplaint.latest_reported_at || selectedComplaint.detected_at || selectedComplaint.completed_at || selectedComplaint.rejected_at)}</strong></div>
+            </div>
+
+            {Array.isArray(selectedComplaint.detections) && selectedComplaint.detections.length > 0 && (
+              <div className="evidence-detections">
+                <h3>Detected Damage</h3>
+                <ul>
+                  {selectedComplaint.detections.map((d, idx) => (
+                    <li key={`${d.damage_type}-${idx}`}>
+                      <strong>{d.damage_type}</strong> — {(d.confidence * 100).toFixed(0)}% • {d.severity}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+          </div>
+        </div>
+      )}
+
+      {rejectingComplaint && (
+        <div className="modal-backdrop" onMouseDown={() => setRejectingComplaint(null)}>
+          <div className="evidence-modal small-modal" onMouseDown={e => e.stopPropagation()}>
+            <button className="close" onClick={() => setRejectingComplaint(null)}>×</button>
+            <div className="section-title"><div><span className="eyebrow">REJECTION REVIEW</span><h2>Complaint #{rejectingComplaint.id}</h2></div></div>
+            <label className="reason-field">
+              <span>Why are you rejecting this complaint?</span>
+              <textarea value={rejectReason} onChange={e => setRejectReason(e.target.value)} rows="5" placeholder="Example: Fake complaint, Incorrect location, No road damage found, Duplicate/invalid evidence, Image not related to road damage, Other" />
+            </label>
+            <div className="reason-suggestions">
+              <button type="button" onClick={() => setRejectReason("Fake complaint")}>Fake complaint</button>
+              <button type="button" onClick={() => setRejectReason("Incorrect location")}>Incorrect location</button>
+              <button type="button" onClick={() => setRejectReason("No road damage found")}>No road damage found</button>
+              <button type="button" onClick={() => setRejectReason("Duplicate/invalid evidence")}>Duplicate/invalid evidence</button>
+            </div>
+            <button className="action-btn danger submit-reject" disabled={!rejectReason.trim()} onClick={() => rejectComplaint(rejectingComplaint.id, rejectReason)}>Submit Rejection</button>
+          </div>
+        </div>
       )}
 
       {loginOpen && (
@@ -504,3 +655,4 @@ function LanguagePicker({ selected, query, onQueryChange, onSelect, filterLabel,
 }
 
 createRoot(document.getElementById("root")).render(<App />);
+

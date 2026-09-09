@@ -1,0 +1,173 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #f4f7fb;
+  color: #172033;
+}
+
+.app {
+  max-width: 1500px;
+  margin: auto;
+  padding: 24px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 22px;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 32px;
+}
+
+.header p {
+  margin: 6px 0 0;
+  color: #667085;
+}
+
+.live {
+  color: #067647;
+  background: #dcfae6;
+  padding: 9px 14px;
+  border-radius: 20px;
+  font-weight: bold;
+}
+
+.error {
+  background: #fee4e2;
+  color: #b42318;
+  padding: 12px;
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.card {
+  background: white;
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.06);
+}
+
+.card span {
+  display: block;
+  color: #667085;
+  font-size: 14px;
+}
+
+.card strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 30px;
+}
+
+.card.danger {
+  border-left: 5px solid #d92d20;
+}
+
+.content {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 18px;
+}
+
+.panel {
+  background: white;
+  border-radius: 14px;
+  padding: 18px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.06);
+}
+
+.panel h2 {
+  margin: 0 0 14px;
+  font-size: 19px;
+}
+
+.map {
+  height: 520px;
+  width: 100%;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 12px 9px;
+  border-bottom: 1px solid #eaecf0;
+  text-align: left;
+  font-size: 14px;
+}
+
+th {
+  color: #667085;
+}
+
+.badge {
+  padding: 5px 9px;
+  border-radius: 14px;
+  font-weight: bold;
+  font-size: 12px;
+}
+
+.critical {
+  background: #fee4e2;
+  color: #b42318;
+}
+
+.high {
+  background: #fff0db;
+  color: #b54708;
+}
+
+.medium {
+  background: #fff6bf;
+  color: #8a6d00;
+}
+
+.low {
+  background: #dcfae6;
+  color: #067647;
+}
+
+select {
+  padding: 6px;
+  border: 1px solid #d0d5dd;
+  border-radius: 7px;
+}
+
+button {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+@media (max-width: 1000px) {
+  .cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .content {
+    grid-template-columns: 1fr;
+  }
+}
